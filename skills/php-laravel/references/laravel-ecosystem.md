@@ -12,6 +12,10 @@ class OrderShipped extends Notification implements ShouldQueue
 {
     use Queueable;
 
+    public function __construct(public readonly Order $order)
+    {
+    }
+
     public function via(object $notifiable): array
     {
         // Channel selection per user preference
@@ -45,7 +49,7 @@ Notification::send($users, new OrderShipped($order));
 - Always implement `ShouldQueue`; notifications are side effects, never block the request
 - Use `toArray()` for database channel; it powers in-app notification feeds
 - Read: `$user->unreadNotifications`, mark: `$notification->markAsRead()`
-- Rate limit with `ShouldBeUnique` to prevent notification spam
+- Apply notification `middleware()` with a configured queue rate limiter for delivery frequency. `ShouldBeUnique` on a notification does not make Laravel's `SendQueuedNotifications` wrapper unique. For duplicate-event suppression, use a unique outer job or durable recipient/event deduplication; rate limiting alone does not provide that guarantee.
 
 ## Broadcasting
 
@@ -84,6 +88,8 @@ Key methods:
 - `->emailOutputOnFailure('ops@example.com')`: alert on failures
 - Requires system cron: `* * * * * cd /path && php artisan schedule:run >> /dev/null 2>&1`
 
+`schedule:interrupt` signals cooperative shutdown; it does not preempt an event already executing. For a long command that must stop during deployment, process bounded batches, check cancellation between batches, and persist enough progress to resume. Use `Schedule::hasBeenInterruptedSince($startedAt)` only when the installed framework provides the timestamp-based interrupt implementation and interruption polling is enabled. Capture the command's start time once. Verify that a command started before the signal stops at its next checkpoint and one started after the signal continues; do not assume the scheduler's own loop interrupts command code.
+
 ## Custom Casts
 
 Value objects for model attributes: encapsulate formatting, validation, and behavior.
@@ -91,7 +97,7 @@ Value objects for model attributes: encapsulate formatting, validation, and beha
 ```php
 class Money implements CastsAttributes
 {
-    public function get(Model $model, string $key, mixed $value, array $attributes): Money
+    public function get(Model $model, string $key, mixed $value, array $attributes): MoneyValue
     {
         return new MoneyValue(
             amount: (int) $value,
@@ -118,6 +124,8 @@ Built-in casts to prefer over manual accessors:
 - `AsStringable::class`: fluent string operations on attribute
 - Enum casts: `'status' => OrderStatus::class` gives automatic PHP enum <-> DB value
 - Encrypted cast: `'api_token' => 'encrypted'` gives transparent encrypt/decrypt for sensitive fields
+
+Treat a nested model assignment such as `fill(['secrets->token' => $token])` separately from assigning the whole attribute. On versions without the encrypted-class JSON-path fix (framework PR #61834), `AsEncryptedArrayObject` and `AsEncryptedCollection` bypass their normal cast setter on this path. The old path can discard sibling values and save plaintext JSON. Until the installed `HasAttributes` implementation decrypts and re-encrypts encrypted class casts during JSON-path updates, read the cast value, modify it, reassign the whole attribute, and save the model. Verify raw persisted ciphertext and a fresh model's decrypted value, including preserved siblings. Query-builder JSON updates bypass this model path and need separate verification.
 
 ## Security Hardening
 

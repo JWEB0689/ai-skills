@@ -10,7 +10,7 @@
 - **Prometheus metrics**: track latency (Histogram), traffic (Counter), errors (Counter), saturation (Gauge). Keep label cardinality bounded (no user IDs)
 - **OpenTelemetry** for distributed tracing across services: start the SDK before importing the libraries it patches, or auto-instrumentation no-ops. Before trusting a signal, force an error and test traffic in staging and confirm the log/metric/trace lands; untested instrumentation fails silent
 - **Alert on symptoms, not causes**: page on user-visible symptoms (error-rate spike, latency SLO burn, readiness flapping), not on causes (CPU high, queue depth growing). A cause with no symptom is a dashboard, not a page.
-- **Never mutate `LogRecord` attributes from a `Formatter`.** A custom `logging.Formatter.format()` that rewrites `record.name` (or any record attribute) in place leaks to every other handler attached to the same logger and to pytest `caplog`. `Logger.callHandlers` passes the same `LogRecord` object to each handler; whichever formats first wins the mutation, and downstream handlers and test filters see the modified state. Tests filtering by full logger name (`if r.name == "src.services.foo"`) then silently miss; routing handlers doing `LOGGER_TO_MODEL.get(record.name)` fall through to defaults. Use a `logging.Filter` that adds a non-mutating attribute (`record.short_name`) and reference it in the format string as `%(short_name)s`, or override `formatMessage` instead of `format`. `try`/`finally` restore works for synchronous handler chains but is fragile under async handlers that interleave.
+- **Never mutate `LogRecord` attributes from a `Formatter`.** A custom `logging.Formatter.format()` that rewrites `record.name` (or any record attribute) in place leaks to every other handler attached to the same logger and to pytest `caplog`. `Logger.callHandlers` passes the same `LogRecord` object to each handler; whichever formats first wins the mutation, and downstream handlers and test filters see the modified state. Tests filtering by full logger name (`if r.name == "src.services.foo"`) then silently miss; routing handlers doing `LOGGER_TO_MODEL.get(record.name)` fall through to defaults. Use a `logging.Filter` that adds a non-mutating attribute (`record.short_name`) and reference it in the format string as `%(short_name)s`. Overriding `formatMessage` instead of `format` does not isolate the record: it receives the same shared `LogRecord`. `try`/`finally` restore works for synchronous handler chains but is fragile under async handlers that interleave.
 
 
 ## Error Handling
@@ -22,11 +22,15 @@
 - Batch processing: `BatchResult(succeeded={}, failed={})`; don't let one item abort the batch
 - Pydantic `BaseModel` with `field_validator` for complex input validation
 
+### JSONL framing
+
+Frame JSONL records on LF (`\n`), using an LF-delimited stream reader or `text.split("\n")` for an already bounded buffer. Do not use `str.splitlines()`: U+0085, U+2028, and U+2029 are valid inside JSON strings, but `splitlines()` treats those characters as record boundaries. Accept CRLF by leaving the trailing CR as JSON whitespace. Allow a final LF without inventing an extra record; reject blank records between values. Bound record size before accumulating or parsing untrusted input. Test literal and JSON-escaped forms of all three Unicode characters, LF and CRLF delimiters, and a final record without a delimiter.
+
 
 ## Migrations
 
 - Separate schema and data migrations; data backfills in their own migration file
-- Renames/removals use expand-contract: add new column → backfill → switch reads → drop old (see `ia-postgresql` skill for the full pattern)
+- Renames/removals use expand-contract: add new column → deploy compatible dual writes → drain old writers → backfill and reconcile → switch reads → drop old in a later deploy (see `ia-postgresql` skill for the full pattern)
 - Never edit a migration that has already run in a shared environment
 - Alembic: use `--autogenerate` as a starting point, always review generated SQL before committing
 - Test migrations against production-sized data; a migration that takes 2ms on dev can lock a table for minutes in production

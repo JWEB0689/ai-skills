@@ -68,7 +68,7 @@ See [fastapi.md](./fastapi.md) for project structure, lifespan, config, DI, asyn
 - Return job ID immediately, process async. Client polls `/jobs/{id}` for status
 - **Celery**: `@app.task(bind=True, max_retries=3, autoretry_for=(ConnectionError,))` with exponential backoff: `raise self.retry(countdown=2**self.request.retries * 60)`
 - **Alternatives**: Dramatiq (modern Celery), RQ (simple Redis), cloud-native (SQS+Lambda, Cloud Tasks)
-- **Idempotency is mandatory**: tasks may retry. Use idempotency keys for external calls and atomic upserts for writes (`ON CONFLICT DO UPDATE`, `INSERT ... ON DUPLICATE KEY UPDATE`). A read-then-write pair is not idempotent under concurrent retry: two workers both read "absent" and both insert. Uniqueness has to be enforced by a database constraint, not by the preceding read
+- **Prove replay idempotency**: tasks may retry. An atomic upsert prevents a duplicate-row race but can repeat an effect (`ON CONFLICT DO UPDATE SET count = count + 1`). Use deterministic same-operation assignments where sufficient, or insert a consumer/message receipt under a uniqueness constraint and apply its database effects in the same transaction; roll back both on failure and acknowledge only after commit. Record intent before external effects, use stable operation keys where the provider supports them, and reconcile unknown outcomes before replay. Test retries after rollback and after a committed effect, including a lost response; neither a read-before-write check nor uniqueness alone proves the effect happens once.
 - Dead letter queue for permanently failed tasks after max retries
 - Task workflows: `chain(a.s(), b.s())` for sequential, `group(...)` for parallel, `chord(group, callback)` for fan-out/fan-in
 
@@ -77,10 +77,11 @@ See [fastapi.md](./fastapi.md) for project structure, lifespan, config, DI, asyn
 
 **Retries with tenacity:**
 ```python
-from tenacity import retry, stop_after_attempt, wait_exponential_jitter, retry_if_exception_type
+import httpx
+from tenacity import retry, stop_after_attempt, stop_after_delay, wait_exponential_jitter, retry_if_exception_type
 
 @retry(
-    retry=retry_if_exception_type((ConnectionError, TimeoutError)),
+    retry=retry_if_exception_type(httpx.TransportError),
     stop=stop_after_attempt(5) | stop_after_delay(60),
     wait=wait_exponential_jitter(initial=1, max=30),
     before_sleep=log_retry_attempt,
@@ -88,6 +89,8 @@ from tenacity import retry, stop_after_attempt, wait_exponential_jitter, retry_i
 def call_api(url: str) -> dict: ...
 ```
 
+- Name the client's own transport classes in the retry predicate (`httpx.TransportError`, `requests.ConnectionError`/`requests.Timeout`, botocore's `EndpointConnectionError`): builtin `ConnectionError`/`TimeoutError` are not their base classes, so a predicate on the builtins retries nothing those clients raise.
+- **Never classify errors by `type(exc).__name__`.** Name matching misses subclasses (`ConnectionResetError` is a `ConnectionError`) and every SDK that wraps its transport in its own hierarchy (botocore, httpx, openai, requests' `Timeout`). On 3.11+, `asyncio.TimeoutError`, `concurrent.futures.TimeoutError` and `socket.timeout` are the builtin `TimeoutError`, so a thread-pool timeout matches an API-outage rule. Use `isinstance` against each SDK's own base classes.
 - Retry only transient errors: network, 429/502/503/504. Never retry 4xx (except 429), auth errors, validation errors
 - Every network call needs a timeout
 - `@fail_safe(default=[])` decorator for non-critical paths: return cached/default on failure. **Never on a path where the call is the security decision** (authz check, trust score, entitlement or license gate): there the default has to be deny, and a `default=[]` or `default=None` that a caller reads as "no restrictions" is a fail-open with a decorator on it. Any fail-open allowance scopes to transport failure alone: `ConnectError`, `ConnectTimeout`. A response that arrived but cannot be trusted (4xx/5xx, malformed JSON, a body that fails schema validation, an unrecognized verdict string) stays denied, because the endpoint was reached and did not answer. Same for a "no record yet" state: reject by default, allow only through an explicit onboarding opt-in
@@ -95,6 +98,8 @@ def call_api(url: str) -> dict: ...
 - Stack decorators: `@traced @with_timeout(30) @retry(...)` to separate infra from business logic
 
 **Connection pooling** is mandatory for production: reuse `httpx.AsyncClient()` across requests, configure SQLAlchemy `pool_size`/`max_overflow`, use `aiohttp.TCPConnector(limit=N)`.
+
+- **Recycle manually shared resources after draining users.** When a use count, age, or memory threshold triggers replacement, stop admitting work to the retiring resource. Wait for active leases to finish before closing the resource. Give one lifecycle owner responsibility for close and reinitialization; concurrent callers must not each recycle the same resource. Resume admission only after the replacement is ready. Keep a strong reference to the cleanup task and await it through `asyncio.shield()` when caller cancellation must not interrupt cleanup. Re-raise the caller's `CancelledError`; shielding does not make the caller succeed. Have the lifecycle owner observe cleanup failures and await cleanup during shutdown under the shutdown deadline. Exercise threshold crossing with overlapping work and cancellation during shutdown. Use a mature pool's documented lifecycle rather than adding a second recycling owner.
 
 - **Switching to a shared pooled `requests.Session` newly exposes stale keep-alive failures.** Module-level `requests.get`/`requests.post` build a fresh `Session` and connection pool per call, so a dead or half-closed socket can never be served; a process-wide `Session` reuses keep-alive connections, and urllib3 does not liveness-probe one before reuse. When an LB or NAT has silently dropped an idle socket (an ALB's default idle timeout is 60s), the next reuse raises `ConnectionError` wrapping urllib3 `ProtocolError` / `http.client.RemoteDisconnected`, and under `HTTPAdapter(max_retries=0)`, chosen to "keep behavior unchanged", it reaches the caller unretried. That claim is true of *response* semantics (status, timeouts, body) and false of *connection-failure* semantics. It bites hardest during traffic lulls, when the connection has been idle past the LB timeout
 - **`Retry(connect=1)` does not cover a stale keep-alive**; it is the wrong layer. urllib3 routes errors by class and a stale socket is a *read*/protocol error: `Retry._is_connection_error(ProtocolError('Connection aborted.', OSError()))` is `False` while `_is_read_error(...)` is `True`, so a connect budget never applies. Covering it needs `read >= 1`, but `Retry.DEFAULT_ALLOWED_METHODS` is `{GET, HEAD, PUT, DELETE, OPTIONS, TRACE}`: POST and PATCH are excluded, and widening `allowed_methods` retries non-idempotent writes that may already have reached the server. There is no one-liner that safely covers everything: either scope the retry to idempotent verbs and let writes bubble, or accept the risk deliberately because an outer layer (a queue redelivery that re-runs the whole unit of work) self-heals it, and then stop claiming the behavior is unchanged. Before prescribing any HTTP-retry config, name the exact exception class, map it through `_is_connection_error`/`_is_read_error`, and check `allowed_methods` against the verbs actually in use

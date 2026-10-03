@@ -9,7 +9,7 @@ All 33 Claude Code hook events are declarable in agent frontmatter; there is no 
 | Event | Fires in agent context | Decision control |
 |-------|----------------------|------------------|
 | **PreToolUse** | Yes | `permissionDecision`: allow, deny, ask, defer |
-| **PostToolUse** | Yes | None (observe only) |
+| **PostToolUse** | Yes | `decision: block` adds feedback; output replacement can change model-visible results, but cannot undo completed side effects |
 | **PermissionRequest** | Yes | `decision.behavior` |
 | **PostToolUseFailure** | Yes | None (observe only) |
 | **PermissionDenied** | Yes | `retry: true` lets the model retry the denied call; ignored when the classifier gave no verdict |
@@ -24,10 +24,10 @@ A frontmatter `Stop` hook is rewritten to `SubagentStop` whenever the agent is i
 
 Return a `permissionDecision` to control whether a tool call proceeds:
 
-- **allow**: bypass permission checks, let the call through
+- **allow**: skip the permission prompt; matching deny and ask rules still apply
 - **deny**: block the call silently (agent sees denial, user does not approve)
 - **ask**: escalate to user confirmation
-- **defer**: fall through to the next hook or default behavior
+- **defer**: pause a single-tool, non-interactive `-p` run without executing the call; the caller receives `stop_reason: "tool_deferred"`. Interactive sessions and multi-tool batches ignore defer
 
 Use PreToolUse to enforce invariants on structured tool input: block built-in `Edit`/`Write` calls to protected paths (for Bash, see below), require confirmation for destructive operations, or inject validation before specific tools run.
 
@@ -42,7 +42,11 @@ Use PreToolUse to enforce invariants on structured tool input: block built-in `E
     "permissionDecisionReason": "path is under a protected prefix" } }
 ```
 
+`updatedInput` replaces the entire input object. Include unchanged fields. Permission rules evaluate the replacement. Bind approval and review evidence to the final transformed call, rather than reusing approval for the original arguments. See the [hook output contract](https://code.claude.com/docs/en/hooks#pretooluse-decision-control).
+
 Parse the incoming event and build this response with a real JSON tool (`jq`), never `grep` plus `printf` interpolation. A grep-based field extractor truncates on an escaped quote, and an interpolated response silently malforms on a path containing a quote or newline; in both cases the block evaporates. The same rule covers tool arguments generally: parse them, never string-match the serialised payload, because equivalent JSON differs across models in key order, whitespace, and escaping, so a pattern that matches one model's arguments misses another's. Treat an unparseable payload as deny, not as allow: a gate whose failure mode is "permit" is not a gate. Verify by asserting the hook denies a call it should deny, since a hook that returns nothing looks identical to a hook that approved.
+
+Render control characters, bidirectional controls, and invisible code points in denial messages as visible escapes, such as `U+202E`. Bound the displayed value's length and mark truncation. Evaluate policy against the original parsed value; do not strip legitimate joiners or substitute the display string into the tool call. Check that a filename containing a newline or a direction override cannot conceal the denied path or forge another message line.
 
 A Node hook that emits its response with `process.stdout.write()` must not call `process.exit()` synchronously on the next line. Node documents piped stdout writes as asynchronous on POSIX, and the hook runner reads the response through a pipe; an immediate exit can terminate the process before the buffer drains, so the runner receives a truncated or empty response and the decision evaporates (observed: a 4 MiB write followed by a bare `exit(0)` delivered 64 KiB). Pass a callback to `write()` and exit from it (`process.stdout.write(json, () => process.exit(0))`), or count pending writes and exit once every callback has fired.
 
@@ -51,6 +55,8 @@ That fail-closed rule covers the gate's decision logic, not its bookkeeping. A h
 PreToolUse also fires once per tool call, never once per batch. Each tool in a parallel batch is evaluated through its own PreToolUse pipeline; a deny on one call neither blocks nor undoes its siblings, and there is no batch-level rollback (PostToolBatch fires only after every tool in the batch has been processed). A stateful gate (one that records "this file has now been checked" as a side effect of its first decision) therefore cannot lock a parallel batch: call 1 is denied, and call 2, dispatched alongside it, evaluates against the already-updated state and passes. A gate that needs all-or-nothing semantics over a batch cannot get them from PreToolUse; verify the end state instead, at the resource or in a Stop/SubagentStop gate.
 
 A gate that inspects a Bash command string for a specific flag must replicate the target CLI's own parsing rules, not run a substring or whitespace-token scan. git accepts any unambiguous prefix of a long option, so `--no-veri` and `--no-verif` run as `--no-verify` and a scan for the literal `--no-verify` under-blocks; a short option with an optional attached value (`git commit -uno` is `--untracked-files=no`) is one argument, so a scan that splits on letters misparses the cluster. Derive the accepted spellings from the CLI's option table, test the gate with abbreviated and clustered forms, and treat an unparseable command as deny.
+
+Parse executable wrappers according to their own grammars. A `timeout` duration is an operand before the executable; `env -S` splits a string into argument values; `sh -c` receives shell code rather than ordinary arguments. Distinguish wrapper options and their values from the nested executable. Bound input size and nesting depth. Support only explicitly parsed forms, and deny unsupported wrappers when the gate must enforce policy. Include cases where an option value resembles a blocked executable and where a blocked executable follows wrapper options. A bounded text parser remains a preliminary gate, not an OS isolation boundary.
 
 Expose narrow-scope overrides separately from the full kill switch: an env var that disables one sub-check (e.g. a routine-command gate) and a path-glob exemption list, distinct from the variable that turns the entire hook off. That lets a user silence one noisy check without disabling the critical destructive-command gate alongside it.
 
@@ -62,9 +68,9 @@ Return `decision.behavior` to control how permission prompts resolve. Useful for
 
 Return `decision: block` to prevent the agent from stopping. Apply this when an agent declares completion but mandatory verification steps remain (tests not run, checklist items unchecked, required outputs missing).
 
-### UserPromptSubmit: Modify Prompts Before Processing
+### UserPromptSubmit: Add Context Before Processing
 
-Declarable in frontmatter like every event, but it fires only when the agent runs as the main session (`claude --agent <name>`); a spawned subagent receives no user prompt, so the hook is inert there. Return a modified `prompt` field to inject context, rewrite instructions, or append constraints before the model sees the prompt.
+Declarable in frontmatter like every event, but it fires only when the agent runs as the main session (`claude --agent <name>`); a spawned subagent receives no user prompt, so the hook is inert there. Return `hookSpecificOutput.additionalContext` to add context alongside the submitted prompt. The hook cannot replace the prompt.
 
 ## MCP Tool Matchers
 
@@ -72,9 +78,15 @@ Target specific MCP tools using regex patterns in the `matcher` field:
 
 ```json
 {
-  "hook": "PreToolUse",
-  "matcher": "mcp__memory__.*",
-  "command": "./hooks/guard-memory-writes.sh"
+  "hooks": {
+    "PreToolUse": [{
+      "matcher": "^mcp__memory__.*$",
+      "hooks": [{
+        "type": "command",
+        "command": "./hooks/guard-memory-writes.sh"
+      }]
+    }]
+  }
 }
 ```
 
@@ -89,25 +101,25 @@ Common patterns:
 
 Regex matchers enable policy enforcement across MCP servers without enumerating every tool. Combine with PreToolUse `deny` to block matched tools (the sandbox does not apply to MCP calls, so this tool-level deny is the enforcement), or with `ask` to require human approval for specific operations.
 
-**Matcher semantics.** `"*"`, `""`, or an omitted `matcher` field all match every tool call. Anything else is a JavaScript regex tested unanchored via `RegExp.prototype.test`, so `mcp__memory` (no `.*`) still matches `mcp__memory__write`. Anchor deliberately, or leave the field off when a catch-all is actually intended.
+**Matcher semantics for tool events.** `"*"`, `""`, or an omitted `matcher` matches all calls. A value containing only letters, digits, `_`, `-`, spaces, `,`, and `|` matches exact names, with `,` or `|` separating alternatives. Thus `mcp__memory` does not match `mcp__memory__write`. Other characters select an unanchored JavaScript regex; use anchors for whole-name matching.
 
-**The `if` field.** Hook entries also accept an `if` field using permission-rule syntax (`"Bash(git *)"`, `"Edit(*.ts)"`) to scope a hook past what the matcher alone can express. Only tool-shaped events evaluate it: PreToolUse, PostToolUse, PostToolUseFailure, PermissionRequest, PermissionDenied. An `if` attached to a non-tool event (Stop, SessionStart) is inert.
+**The `if` field.** Hook entries also accept an `if` field using permission-rule syntax (`"Bash(git *)"`, `"Edit(*.ts)"`) to scope a hook past what the matcher alone can express. Only tool-shaped events evaluate it: PreToolUse, PostToolUse, PostToolUseFailure, PermissionRequest, PermissionDenied. A hook with `if` on a non-tool event never runs.
 
 ## Two-Tier Configuration Strategy
 
 Separate shared policy from personal overrides:
 
 **Shared config** (committed to repo):
-`.claude/hooks/config/hooks-config.json`
+`.claude/settings.json` (project hooks), or `hooks/hooks.json` relative to a plugin root (plugin hooks)
 
 Contains team-wide policy: approval gates for destructive tools, audit logging, security boundaries. Committed and version-controlled so all team members inherit the same governance.
 
 **Personal overrides** (git-ignored):
-`.claude/hooks/config/hooks-config.local.json`
+`.claude/settings.local.json`
 
-Individual toggles: disable noisy hooks during focused work, add personal notification hooks, override thresholds. Add to `.gitignore` so personal preferences never pollute the shared config.
+Use personal settings for local additions; do not assume that omitting an inherited hook disables it. Keep the file git-ignored. Project-relative commands above assume the scripts exist in that project; plugin handlers should use the plugin's runtime root for bundled scripts.
 
-**Per-hook disable toggles**: include an `enabled` field in each hook entry. Quick suppression without removing configuration: flip the toggle, don't delete the block. Restoring a disabled hook is a one-character change instead of reconstructing the config.
+**Disable behavior:** Native configuration has no per-hook `enabled` field. Remove an optional handler from its defining settings, or implement a documented environment switch in that handler. Do not expose an override for mandatory authorization checks. `disableAllHooks` is the native global switch. A custom configuration file needs an explicit loader; Claude Code does not load arbitrary paths. See the [hook configuration reference](https://code.claude.com/docs/en/hooks#configuration).
 
 ## Async Hooks
 
@@ -115,10 +127,16 @@ For non-blocking side effects that should not slow the agent loop:
 
 ```json
 {
-  "hook": "PostToolUse",
-  "matcher": ".*",
-  "command": "./hooks/audit-log.sh",
-  "async": true
+  "hooks": {
+    "PostToolUse": [{
+      "matcher": "*",
+      "hooks": [{
+        "type": "command",
+        "command": "./hooks/audit-log.sh",
+        "async": true
+      }]
+    }]
+  }
 }
 ```
 
@@ -132,4 +150,4 @@ Set `async: true` for logging, notifications, metrics collection, or any hook wh
 
 **Hooks replace hardcoded governance.** Instead of encoding approval logic in tool implementations, declare it in hook configuration. This keeps tools as primitives (principle of granularity) while governance becomes a composable layer (principle of composability). Adding a new approval gate means adding a hook entry, not modifying tool code.
 
-**MCP matchers enable capability-based security.** Rather than trusting all tools equally, define security tiers via matcher patterns. Read-only tools auto-approve; write tools require confirmation; delete tools require explicit human approval. The security policy lives in configuration, not in each tool's implementation.
+**MCP matchers select tools; policy supplies authority.** Auto-approve read-only calls only when operator policy permits the operation, the server's provenance is trusted, and verified behavior stays within the approved bounds. A `get_` prefix or `readOnlyHint` is a server declaration, not proof. Wildcard approval also covers future matching tools; use an explicit tool allowlist when additions need review. Require confirmation for write or delete operations according to the operator's policy.
