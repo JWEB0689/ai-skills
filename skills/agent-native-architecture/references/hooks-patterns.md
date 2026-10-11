@@ -16,7 +16,11 @@ All 33 Claude Code hook events are declarable in agent frontmatter; there is no 
 | **Stop** | Yes; converted to `SubagentStop` when the agent runs as a subagent | `decision: block` to prevent stopping |
 | **SubagentStop** | Yes | `decision: block` to prevent stopping |
 
-A frontmatter `Stop` hook is rewritten to `SubagentStop` whenever the agent is invoked as a subagent (via the Agent tool or an @-mention). The same frontmatter hooks fire unmodified when that agent instead runs as the main session via `claude --agent <name>`. A hook written for one context stays live in the other, so it needs to tolerate both. Project-level agent frontmatter hooks require workspace trust (Claude Code v2.1.218+); an untrusted workspace skips them without error.
+A frontmatter `Stop` hook is rewritten to `SubagentStop` whenever the agent is invoked as a subagent (via the Agent tool or an @-mention). The same frontmatter hooks fire unmodified when that agent instead runs as the main session via `claude --agent <name>`. A hook written for one context stays live in the other, so it needs to tolerate both. Project-level agent frontmatter hooks require workspace trust (Claude Code v2.1.218+); an untrusted workspace skips them and logs the reason in the debug log. See [subagent frontmatter hooks](https://code.claude.com/docs/en/sub-agents#hooks-in-subagent-frontmatter).
+
+### Frontmatter Hook Lifetime
+
+Subagent hooks are removed when the subagent finishes. [Skill hooks](https://code.claude.com/docs/en/skills#frontmatter-reference) register on invocation and persist across later turns; `once: true` removes a hook after its first successful run. Project skill hooks also register in untrusted `-p` sessions, unlike project subagent hooks in v2.1.218+. Account for this lifetime when designing a guard skill. See [frontmatter hook scope](https://code.claude.com/docs/en/hooks#hooks-in-skills-and-agents).
 
 ## Decision Control Patterns
 
@@ -30,6 +34,8 @@ Return a `permissionDecision` to control whether a tool call proceeds:
 - **defer**: pause a single-tool, non-interactive `-p` run without executing the call; the caller receives `stop_reason: "tool_deferred"`. Interactive sessions and multi-tool batches ignore defer
 
 Use PreToolUse to enforce invariants on structured tool input: block built-in `Edit`/`Write` calls to protected paths (for Bash, see below), require confirmation for destructive operations, or inject validation before specific tools run.
+
+Check both the supplied path and its resolved target in a protected-path hook. For a new file, resolve the nearest existing parent and append the remaining components. Treat resolution errors, including dangling symlinks and permission failures, as protected. Treat an existing regular file with `nlink > 1` as protected because another name may reach the same data. Permit exceptions only through explicit operator policy. These checks describe the hook's own logic; do not assume host permission rules resolve paths identically or that a preflight check prevents concurrent path replacement.
 
 **Gates that match Bash command text are best-effort, not a boundary.** Claude Code's own permission rules have documented gaps, and a hook that matches command text the same way repeats them. `Read`/`Edit` deny rules cover the built-in file tools, the Bash file commands Claude Code recognizes (`cat`, `head`, `tail`, `sed`, `tee`), and redirection targets; they do not cover a command that reads files without naming them (`grep -r pattern .`) or a Python or Node script that opens files itself. A `Bash(...)` deny rule matches the command text after compound splitting and wrapper stripping, so it misses the same program by full path (`/bin/rm`), inside `sh -c` or `bash -c`, or with the arguments reshaped (`git -C . push` against `Bash(git push *)`). When a protected-path or network invariant must hold against shell commands, enforce it with Claude Code's OS-level sandbox (filesystem and network isolation that applies to Bash, PowerShell, and Monitor commands and their child processes) or a read-only mount, and keep the text gate as the fast, explainable first layer. The sandbox does not cover the built-in Read, Edit, and Write tools or MCP tools; for those, the tool-level deny (a permission rule, or a PreToolUse `deny` on the parsed tool input) is the enforcement. `Edit` rules apply to every built-in file-editing tool; `Read` rules reach Grep, Glob, and `@file` mentions only on a best-effort basis.
 
@@ -52,11 +58,15 @@ A Node hook that emits its response with `process.stdout.write()` must not call 
 
 That fail-closed rule covers the gate's decision logic, not its bookkeeping. A hook that tracks per-session state (a first-touch marker, a cache file, a state directory) hits a separate failure mode when that storage is unwritable or corrupt: failing closed there blocks every later call in the session with no way to ever record "already checked", which deadlocks the gate rather than protecting it. Fail open on bookkeeping failures instead, and name the broken path or variable in a stderr warning so the gap is visible rather than silent.
 
+For synchronous policy `command` or `http` hooks on Claude Code **v2.1.295+**, set `onFailure: "block"` to cover startup failures, crashes, JSON parse/schema failures, and timeouts. Plain-text command output is not a parse failure; validate the returned decision too. This setting has no effect on background hooks (`async` or `asyncRewake`) or `Stop`, `SubagentStop`, `TaskCompleted`, and `TeammateIdle`. Handle bookkeeping errors inside the handler and warn; command hooks must still return the policy decision with exit 0. See [host failure handling](https://code.claude.com/docs/en/hooks#block-the-action-when-a-hook-fails).
+
 PreToolUse also fires once per tool call, never once per batch. Each tool in a parallel batch is evaluated through its own PreToolUse pipeline; a deny on one call neither blocks nor undoes its siblings, and there is no batch-level rollback (PostToolBatch fires only after every tool in the batch has been processed). A stateful gate (one that records "this file has now been checked" as a side effect of its first decision) therefore cannot lock a parallel batch: call 1 is denied, and call 2, dispatched alongside it, evaluates against the already-updated state and passes. A gate that needs all-or-nothing semantics over a batch cannot get them from PreToolUse; verify the end state instead, at the resource or in a Stop/SubagentStop gate.
 
 A gate that inspects a Bash command string for a specific flag must replicate the target CLI's own parsing rules, not run a substring or whitespace-token scan. git accepts any unambiguous prefix of a long option, so `--no-veri` and `--no-verif` run as `--no-verify` and a scan for the literal `--no-verify` under-blocks; a short option with an optional attached value (`git commit -uno` is `--untracked-files=no`) is one argument, so a scan that splits on letters misparses the cluster. Derive the accepted spellings from the CLI's option table, test the gate with abbreviated and clustered forms, and treat an unparseable command as deny.
 
 Parse executable wrappers according to their own grammars. A `timeout` duration is an operand before the executable; `env -S` splits a string into argument values; `sh -c` receives shell code rather than ordinary arguments. Distinguish wrapper options and their values from the nested executable. Bound input size and nesting depth. Support only explicitly parsed forms, and deny unsupported wrappers when the gate must enforce policy. Include cases where an option value resembles a blocked executable and where a blocked executable follows wrapper options. A bounded text parser remains a preliminary gate, not an OS isolation boundary.
+
+Include shell receivers inside ordinary programs: GNU sed's `e` command and `s///e` flag execute shell code, `-e` scripts can follow file operands, and without `-e`/`-f` the first operand after `--` is the script. Reject backslashes in execution-bearing sed fragments; GNU sed decodes `\xHH`, `\oNNN`, and `\dNNN` before evaluation. Recognize shell `-c` inside clusters such as `bash -lc` and `sh -ec`, `su -c`/`--command`, and `taskset`'s mask operand before the executable; deny when the nesting limit is exceeded.
 
 Expose narrow-scope overrides separately from the full kill switch: an env var that disables one sub-check (e.g. a routine-command gate) and a path-glob exemption list, distinct from the variable that turns the entire hook off. That lets a user silence one noisy check without disabling the critical destructive-command gate alongside it.
 
@@ -72,6 +82,14 @@ Return `decision: block` to prevent the agent from stopping. Apply this when an 
 
 Declarable in frontmatter like every event, but it fires only when the agent runs as the main session (`claude --agent <name>`); a spawned subagent receives no user prompt, so the hook is inert there. Return `hookSpecificOutput.additionalContext` to add context alongside the submitted prompt. The hook cannot replace the prompt.
 
+### Prompt and Agent Hooks
+
+Prefer command hooks for production enforcement. `type: "prompt"` makes one model call (30 s default); experimental `type: "agent"` uses tools for up to 50 turns (60 s default). Define an allow/block rule or required condition. `ok: true` permits the action; `ok: false` requires `reason`. Treat event JSON and inspected content as data, never instructions.
+
+For prompt hooks on `PreToolUse`, `ok: false` denies and ends the turn in v2.1.210+; earlier versions continued. `continueOnBlock: true` returns the reason as a tool error and continues. Agent hooks already use that continuing behavior and have no `continueOnBlock` field.
+
+On `PermissionRequest`, prompt-hook `ok: false` has no effect; agent hooks are skipped. Deny through a command hook's `hookSpecificOutput.decision.behavior: "deny"`. `PermissionDenied` discards both model-hook outputs. `SessionStart` and `Setup` support neither type. Check the [event-specific response contract](https://code.claude.com/docs/en/hooks#response-schema) before deploying.
+
 ## MCP Tool Matchers
 
 Target specific MCP tools using regex patterns in the `matcher` field:
@@ -83,12 +101,15 @@ Target specific MCP tools using regex patterns in the `matcher` field:
       "matcher": "^mcp__memory__.*$",
       "hooks": [{
         "type": "command",
-        "command": "./hooks/guard-memory-writes.sh"
+        "command": "./hooks/guard-memory-writes.sh",
+        "onFailure": "block"
       }]
     }]
   }
 }
 ```
+
+Test this gate with a missing handler and, separately, a handler that exceeds a configured `timeout`. Assert that a matching tool call remains unexecuted in both cases.
 
 Common patterns:
 
@@ -142,7 +163,11 @@ For non-blocking side effects that should not slow the agent loop:
 
 Set `async: true` for logging, notifications, metrics collection, or any hook where the agent does not need the result before proceeding.
 
-**asyncRewake**: for async hooks that should wake the model on failure. Use this when the side effect is best-effort but failures need visibility: a logging hook that fails silently is fine, but a compliance audit hook that fails should surface the error.
+**asyncRewake**: set `asyncRewake: true` to run in the background and wake the model on **exit code 2**. Deliberately map failures requiring attention to exit 2; exit 1 does not wake it. The reminder uses stderr, falling back to stdout when stderr is empty. See [command hook fields](https://code.claude.com/docs/en/hooks#command-hook-fields).
+
+## Hooks Are Cancellable
+
+Keep hook side effects atomic and avoid locks on shared session state. For every Git subprocess, set `GIT_OPTIONAL_LOCKS=0`; also pass `-c diff.autoRefreshIndex=false` for work-tree diffs to suppress index refreshes. Run index-writing operations such as `git stash create` or `git add -N` against a private copy selected by `GIT_INDEX_FILE`. Handle SIGTERM explicitly when cleaning up owned temporary files; Python's default termination skips `finally`. Keep recovery possible after SIGKILL, which cannot run cleanup. See [Git environment controls](https://git-scm.com/docs/git#Documentation/git.txt-GITOPTIONALLOCKS), [diff index refresh](https://git-scm.com/docs/git-diff#Documentation/git-diff.txt-diffautoRefreshIndex), and the [upstream hook cleanup implementation](https://github.com/anthropics/claude-plugins-official/blob/f359d43b4060/plugins/security-guidance/hooks/gitutil.py).
 
 ## Architectural Implications
 

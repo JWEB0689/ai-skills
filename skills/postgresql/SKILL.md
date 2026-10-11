@@ -13,6 +13,7 @@ description: >-
 
 - Preserve raw bytes as bytes when fidelity matters; choose parsed types separately for querying.
 - Treat deployed migrations as immutable and account for old and new application versions during rollout.
+- **Data rollback needs provenance.** Selecting rows by the destination value can also select rows the forward migration never touched. When reversibility is required, preserve affected identities and original values under an explicit policy for subsequent writes. Verify restored data with the application version that will read it.
 - Check lock duration and transaction scope; protect read-modify-write paths against concurrent updates.
 - Match index predicates and NULL semantics to every writer and migration query.
 - Measure query changes with representative data and actual plans; verify invariants as database outcomes.
@@ -37,7 +38,7 @@ A spec that says "log the raw response" is asking for byte fidelity, and no text
 
 ## Verify
 
-Run `EXPLAIN (ANALYZE, BUFFERS)` on changed queries with representative data. Investigate unexpected sequential scans and compare actual costs; accept a sequential scan when reading much of a table is cheaper than using an index. Confirm no unindexed FK columns before declaring done.
+Start changed-query inspection with `EXPLAIN`. Run `EXPLAIN (ANALYZE, BUFFERS)` with representative data only when executing the query and its side effects is authorized and safe. For writes, prefer disposable data; use a transaction followed by rollback only when all relevant effects are transactional. Investigate unexpected sequential scans and compare actual costs; accept a sequential scan when reading much of a table is cheaper than using an index. Confirm no unindexed FK columns before declaring done.
 
 ## Task-specific references
 

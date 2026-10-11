@@ -81,12 +81,14 @@ For simple CLIs (one subcommand, a handful of flags), skip this; one clap-derive
 
 ## Config Layering
 
-Priority (lowest to highest): built-in defaults → `~/.config/myapp/config.toml` → project `.myapp/config.toml` → env vars (`MYAPP_*`) → CLI flags.
+For non-secret settings, use this priority (lowest to highest): built-in defaults → `~/.config/myapp/config.toml` → project `.myapp/config.toml` → env vars (`MYAPP_*`) → CLI flags.
+
+Accept credentials from environment variables, a config file with restrictive permissions, or source-selecting flags such as `--token-file` and `--token-stdin`. Keep literal credentials out of CLI arguments: process listings, `/proc/<pid>/cmdline`, and shell history can expose them. In `doctor`, logs, and JSON errors, report only the credential source (`env`, `config`, `file`, `stdin`, or `missing`). Omit secret-bearing structs from derived `Debug` output or implement explicit redaction.
 
 Use `figment` or hand-roll with `serde` + `toml`:
 
 ```rust
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize)]
 pub struct Config {
     #[serde(default = "default_limit")]
     pub limit: usize,
@@ -196,15 +198,16 @@ Ship completions via the `completions` subcommand rather than pre-generated file
 
 ```rust
 use assert_cmd::Command;
-use predicates::prelude::*;
 
 #[test]
 fn search_returns_json() {
-    Command::cargo_bin("myapp").unwrap()
+    let assertion = Command::cargo_bin("myapp").unwrap()
         .args(["search", "foo", "--json"])
         .assert()
-        .success()
-        .stdout(predicate::str::starts_with("["));
+        .success();
+    let document: serde_json::Value = serde_json::from_slice(&assertion.get_output().stdout)
+        .expect("stdout must contain one complete JSON document");
+    assert!(document.is_array(), "search results must be a JSON array");
 }
 ```
 

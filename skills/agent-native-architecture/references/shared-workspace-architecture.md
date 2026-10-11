@@ -246,37 +246,36 @@ Exercise contained read/write/list/append, creation, stale revision, traversal, 
 
 The UI should observe the same files the agent writes to:
 
-### Pattern 1: File-Based Reactivity (iOS)
+### Pattern 1: File-Based Reactivity
 
-```swift
-class ResearchViewModel: ObservableObject {
-    @Published var researchFiles: [ResearchFile] = []
+Implement `ResearchFiles` as an application adapter over the scoped workspace. Its subscription uses the selected filesystem or native provider's observation mechanism; it is not a built-in TypeScript API. Supply the UI renderer and error handler, and call the returned cleanup function when the view unmounts or changes books.
 
-    private var watcher: DirectoryWatcher?
-
-    func startWatching(bookId: String) {
-        let researchPath = documentsURL
-            .appendingPathComponent("Research")
-            .appendingPathComponent(bookId)
-
-        watcher = DirectoryWatcher(url: researchPath) { [weak self] in
-            // Reload when agent writes new files
-            self?.loadResearchFiles(from: researchPath)
-        }
-
-        loadResearchFiles(from: researchPath)
-    }
+```typescript
+type ResearchFile = { path: string; title: string };
+interface ResearchFiles {
+  list(bookId: string): Promise<ResearchFile[]>;
+  subscribe(bookId: string, changed: () => void, failed: (error: unknown) => void): () => void;
 }
 
-// SwiftUI automatically updates when files change
-struct ResearchView: View {
-    @StateObject var viewModel = ResearchViewModel()
+declare const researchFiles: ResearchFiles;
+declare function renderResearch(files: ResearchFile[]): void;
+declare function reportError(error: unknown): void;
 
-    var body: some View {
-        List(viewModel.researchFiles) { file in
-            ResearchFileRow(file: file)
-        }
+function mountResearchView(bookId: string): () => void {
+  let active = true;
+  let generation = 0;
+  const reload = async () => {
+    const request = ++generation;
+    try {
+      const files = await researchFiles.list(bookId);
+      if (active && request === generation) renderResearch(files);
+    } catch (error) {
+      if (active && request === generation) reportError(error);
     }
+  };
+  const stop = researchFiles.subscribe(bookId, () => { void reload(); }, reportError);
+  void reload();
+  return () => { active = false; stop(); };
 }
 ```
 
@@ -284,37 +283,29 @@ struct ResearchView: View {
 
 When file-watching isn't practical, use a shared data store:
 
-```swift
-// Shared service that both UI and agent tools use
-class BookLibraryService: ObservableObject {
-    static let shared = BookLibraryService()
+The application implements `BookLibraryService`. Serialize mutations inside that service, persist each record, update the snapshot, and notify subscribers before `addAnalysisRecord` resolves. Register `publishToFeed` as the authorized tool handler; mount the UI against the same service instance.
 
-    @Published var books: [Book] = []
-    @Published var analysisRecords: [AnalysisRecord] = []
-
-    func addAnalysisRecord(_ record: AnalysisRecord) {
-        analysisRecords.append(record)
-        // Persists to shared storage
-        saveToStorage()
-    }
+```typescript
+type AnalysisRecord = { bookId: string; content: string; headline: string };
+interface BookLibraryService {
+  getAnalysisRecords(): readonly AnalysisRecord[];
+  subscribe(listener: () => void): () => void;
+  addAnalysisRecord(record: AnalysisRecord): Promise<void>;
 }
 
-// Agent tool writes through the same service
-tool("publish_to_feed", async ({ bookId, content, headline }) => {
-    let record = AnalysisRecord(bookId: bookId, content: content, headline: headline)
-    BookLibraryService.shared.addAnalysisRecord(record)
-    return { text: "Published to feed" }
-})
+declare const library: BookLibraryService;
+declare function renderFeed(records: readonly AnalysisRecord[]): void;
 
-// UI observes the same service
-struct FeedView: View {
-    @StateObject var library = BookLibraryService.shared
+async function publishToFeed(record: AnalysisRecord) {
+  await library.addAnalysisRecord(record);
+  return { text: "Published to feed" };
+}
 
-    var body: some View {
-        List(library.analysisRecords) { record in
-            FeedItemRow(record: record)
-        }
-    }
+function mountFeed(): () => void {
+  const render = () => renderFeed(library.getAnalysisRecords());
+  const unsubscribe = library.subscribe(render);
+  render();
+  return unsubscribe;
 }
 ```
 
@@ -333,23 +324,31 @@ Database:
 │   └── { bookId: "book_123", path: "Research/book_123/introduction.md", ... }
 ```
 
-```swift
-// Agent writes file
-await writeFile("Research/\(bookId)/introduction.md", content)
+Use the `Workspace` service above for file persistence. `researchIndex` is an app-defined database adapter, and `renderIntroduction` is the UI adapter. Treat the index as rebuildable: file replacement and index updates are separate operations, so retry or reconcile indexing failures from the persisted files.
 
-// And updates index
-await database.insert("research_index", {
-    bookId: bookId,
-    path: "Research/\(bookId)/introduction.md",
-    title: extractTitle(content),
-    createdAt: Date()
-})
+```typescript
+type ResearchEntry = { bookId: string; path: string; revision: string };
+declare const workspace: Workspace;
+declare const researchIndex: {
+  upsert(entry: ResearchEntry): Promise<void>;
+  forBook(bookId: string): Promise<ResearchEntry[]>;
+};
+declare function renderIntroduction(path: string, content: string): void;
 
-// UI queries index, then reads files
-let items = database.query("research_index", where: bookId == "book_123")
-for item in items {
-    let content = readFile(item.path)
-    // Display...
+async function saveIntroduction(bookId: string, content: string, expectedRevision: string | null) {
+  if (!/^[a-zA-Z0-9_-]+$/.test(bookId)) throw new Error("Invalid book ID");
+  const path = `Research/${bookId}/introduction.md`;
+  const revision = await workspace.replace(path, content, expectedRevision);
+  await researchIndex.upsert({ bookId, path, revision });
+  return revision;
+}
+
+async function showIntroductions(bookId: string) {
+  const entries = await researchIndex.forBook(bookId);
+  for (const entry of entries) {
+    const file = await workspace.read(entry.path);
+    if (file !== null) renderIntroduction(entry.path, file.content);
+  }
 }
 ```
 </ui_integration>
@@ -423,14 +422,31 @@ A string prefix is insufficient: `Documents-backup` shares the bytes of `Documen
 
 ### Protect Sensitive Files
 
-```swift
-let protectedPaths = [".env", "credentials.json", "secrets/"]
+Check protected names in both the written path and the resolved workspace-relative path. The following handler uses the `Workspace`, `workspacePath`, and Node.js path utilities above; supply `workspaceRoot` from trusted configuration. Apply the same policy to every file tool and exclude protected entries from listings.
 
-tool("read_file", { path }) {
-    if protectedPaths.any({ path.contains($0) }) {
-        throw ToolError("Cannot access protected file")
-    }
-    // ...
+`workspacePath` rejects symlink components. The separate guard below relies on the same stable-directory assumptions as `Workspace`; it does not prevent concurrent path changes. When path resolution can change, enforce protected-name checks inside the storage adapter's coordinated transaction or handle-relative operation, with the containment boundary described above.
+
+```typescript
+declare const workspaceRoot: string;
+declare const workspace: Workspace;
+const protectedNamePatterns = [
+  /\.env/i,
+  /credential|secret/i,
+  /(^|[._-])(keys?|private[-_]?key|api[-_]?key)([._-]|$)/i,
+];
+
+async function assertAllowedFile(path: string): Promise<void> {
+  const canonicalPath = await workspacePath(workspaceRoot, path);
+  const root = await fs.realpath(workspaceRoot);
+  const components = [...path.split(sep), ...relative(root, canonicalPath).split(sep)];
+  if (components.some(component => protectedNamePatterns.some(pattern => pattern.test(component)))) {
+    throw new Error("Cannot access protected file");
+  }
+}
+
+async function readFileForAgent(path: string) {
+  await assertAllowedFile(path);
+  return workspace.read(path);
 }
 ```
 
@@ -438,14 +454,20 @@ tool("read_file", { path }) {
 
 Log what the agent reads/writes:
 
-```swift
-func logFileAccess(action: String, path: String, agentId: String) {
-    logger.info("[\(agentId)] \(action): \(path)")
-}
+Use the authenticated request context for attribution. `logger` is the application's structured logging adapter; it must not accept an agent-supplied identity as the trusted actor. Reuse `assertAllowedFile` from the preceding example.
 
-tool("write_file", { path, content }) {
-    logFileAccess(action: "WRITE", path: path, agentId: context.agentId)
-    // ...
+```typescript
+declare const workspace: Workspace;
+declare const requestContext: { agentId: string };
+declare const logger: {
+  info(event: { action: string; path: string; agentId: string; revision: string }): void;
+};
+
+async function writeFileForAgent(path: string, content: string, expectedRevision: string | null) {
+  await assertAllowedFile(path);
+  const revision = await workspace.replace(path, content, expectedRevision);
+  logger.info({ action: "WRITE", path, agentId: requestContext.agentId, revision });
+  return { text: "File saved", revision };
 }
 ```
 </security_considerations>
@@ -485,125 +507,7 @@ Documents/
 <icloud_sync>
 ## iCloud File Storage for Multi-Device Sync (iOS)
 
-For agent-native iOS apps, use iCloud Drive's Documents folder for your shared workspace. This gives you **free, automatic multi-device sync** without building a sync layer or running a server.
-
-### Why iCloud Documents?
-
-| Approach | Cost | Complexity | Offline | Multi-Device |
-|----------|------|------------|---------|--------------|
-| Custom backend + sync | $$$ | High | Manual | Yes |
-| CloudKit database | Free tier limits | Medium | Manual | Yes |
-| **iCloud Documents** | Free (user's storage) | Low | Automatic | Automatic |
-
-iCloud Documents:
-- Uses user's existing iCloud storage (free 5GB, most users have more)
-- Automatic sync across all user's devices
-- Works offline, syncs when online
-- Files visible in Files.app for transparency
-- No server costs, no sync code to maintain
-
-### Implementation Pattern
-
-```swift
-// Get the iCloud Documents container
-func iCloudDocumentsURL() -> URL? {
-    FileManager.default.url(forUbiquityContainerIdentifier: nil)?
-        .appendingPathComponent("Documents")
-}
-
-// Your shared workspace lives in iCloud
-class SharedWorkspace {
-    let rootURL: URL
-
-    init() {
-        // Use iCloud if available, fall back to local
-        if let iCloudURL = iCloudDocumentsURL() {
-            self.rootURL = iCloudURL
-        } else {
-            // Fallback to local Documents (user not signed into iCloud)
-            self.rootURL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
-        }
-    }
-
-    // All file operations go through this root
-    func researchPath(for bookId: String) -> URL {
-        rootURL.appendingPathComponent("Research/\(bookId)")
-    }
-
-    func journalPath() -> URL {
-        rootURL.appendingPathComponent("Journal")
-    }
-}
-```
-
-### Directory Structure in iCloud
-
-```
-iCloud Drive/
-└── YourApp/                          # Your app's container
-    └── Documents/                    # Visible in Files.app
-        ├── Journal/
-        │   ├── user/
-        │   │   └── 2025-01-15.md     # Syncs across devices
-        │   └── agent/
-        │       └── 2025-01-15.md     # Agent observations sync too
-        ├── Experiments/
-        │   └── magnesium-sleep/
-        │       ├── config.json
-        │       └── log.json
-        └── Research/
-            └── {topic}/
-                └── sources.md
-```
-
-### Handling Sync Conflicts
-
-The provider synchronizes documents, but the application must handle unavailable content and unresolved versions:
-
-Follow the complete [mobile-storage.md](./mobile-storage.md) read/write transaction contract:
-
-1. Inspect the logical document's provider availability and unresolved-version state.
-2. Request download for remote content and return pending; do not classify availability by filename suffix.
-3. Decode only available bytes and propagate decoding errors.
-4. Serialize the complete replacement before acquiring its write transaction.
-5. Compare the current revision with the expected revision while coordinated; retain conflicting versions rather than overwriting them.
-6. Propagate coordination and writer-callback errors. Return the persisted revision only after atomic replacement succeeds.
-7. Mark resolved versions only after the merged document is saved and update UI observers.
-
-The same contract applies to journal entries and agent observations. A local write receipt does not assert that other devices have received the revision.
-
-### What This Enables
-
-1. **User starts experiment on iPhone** → Agent creates `Experiments/sleep-tracking/config.json`
-2. **User opens app on iPad** → Same experiment visible, no sync code needed
-3. **Agent logs observation on iPhone** → Syncs to iPad automatically
-4. **User edits journal on iPad** → iPhone sees the edit
-
-### Entitlements Required
-
-Add to your app's entitlements:
-
-```xml
-<key>com.apple.developer.icloud-container-identifiers</key>
-<array>
-    <string>iCloud.com.yourcompany.yourapp</string>
-</array>
-<key>com.apple.developer.icloud-services</key>
-<array>
-    <string>CloudDocuments</string>
-</array>
-<key>com.apple.developer.ubiquity-container-identifiers</key>
-<array>
-    <string>iCloud.com.yourcompany.yourapp</string>
-</array>
-```
-
-### When NOT to Use iCloud Documents
-
-- **Sensitive data** - Use Keychain or encrypted local storage instead
-- **High-frequency writes** - iCloud sync has latency; use local + periodic sync
-- **Large media files** - Consider CloudKit Assets or on-demand resources
-- **Shared between users** - iCloud Documents is single-user; use CloudKit for sharing
+When implementing an iOS shared workspace with iCloud Documents, follow [mobile-storage.md](./mobile-storage.md) for the native adapter, persistent workspace identity, backend reconciliation, file-state transactions, and entitlements.
 </icloud_sync>
 
 <checklist>
@@ -633,8 +537,8 @@ Collaboration:
 - [ ] Metadata tracks who created/modified (optional)
 
 Multi-Device (iOS):
-- [ ] Use iCloud Documents for shared workspace (free sync)
-- [ ] Fallback to local Documents if iCloud unavailable
-- [ ] Handle `.icloud` placeholder files (trigger download)
-- [ ] Use NSFileCoordinator for conflict-safe writes
+- [ ] Follow [mobile-storage.md](./mobile-storage.md) when using iCloud Documents
+- [ ] Persist workspace ID and backend; reconcile before switching, and retain the same workspace when cloud access is unavailable
+- [ ] Inspect provider-reported availability; request downloads and resume only when local bytes are available
+- [ ] Coordinate revision checks and replacement; retain conflicts, propagate write errors, and distinguish local saves from remote sync
 </checklist>

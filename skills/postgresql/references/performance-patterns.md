@@ -8,10 +8,12 @@ Adding an index is the reflex fix; these four query shapes defeat it. Recognize 
 |-------|----------------------|-----|
 | Function on the column: `WHERE lower(email) = ?` | The stored values are indexed, not the function's output | Expression index `ON (lower(email))`, or generated column |
 | Leading wildcard: `LIKE '%term'` | B-tree matches prefixes only | Trigram GIN (`pg_trgm`) or full-text search |
-| Type mismatch: `WHERE varchar_col = 123` | The implicit cast wraps the column, same as a function | Match the literal's type to the column |
+| Explicit column cast: `WHERE varchar_col::integer = 123` | The integer expression cannot use the ordinary varchar index for this lookup | Compare as text (`WHERE varchar_col = '123'`) when text equality is intended; otherwise use a suitable numeric column or matching expression index |
 | Low selectivity: predicate matches a large fraction of rows | The planner correctly prefers a seq scan; forcing the index is slower | Partial index on the rare value, or accept the seq scan |
 
-Confirm with `EXPLAIN (ANALYZE, BUFFERS)`: an index that exists but never appears in the plan is one of these shapes, not a planner bug.
+Distinguish the explicit cast from `WHERE varchar_col = 123`: with built-in operators and casts, the latter fails operator resolution instead of silently casting the column. Cast to integer only when stored values are valid integers within range.
+
+Start plan inspection with `EXPLAIN`. Use `EXPLAIN (ANALYZE, BUFFERS)` only when executing the query and its side effects is authorized and safe. For writes, prefer disposable data; use a transaction followed by rollback only when all relevant effects are transactional. Check these shapes when an expected index is absent from the plan.
 
 ## Pool exhaustion: relocating the queue is not fixing it
 
@@ -43,3 +45,6 @@ CREATE INDEX ON items USING ivfflat (embedding vector_cosine_ops) WITH (lists = 
 ```
 
 Choose filtering according to the search contract. For exact search over a bounded subset, use a materialized filtered CTE and sort that subset by distance; an ordinary CTE may inline and does not establish a prefilter. For approximate HNSW/IVFFlat search, filters can run after the index retrieves candidates, returning fewer than K rows. Use a matching partial index or partitioning where suitable, or version-gated iterative scans (pgvector 0.8.0+) with tuned search limits. Verify the actual plan, returned count, and recall against an exact baseline; syntax alone proves none of them. Distance operators: `<=>` cosine, `<->` L2, `<#>` inner product.
+
+- For hybrid vector/full-text search with reciprocal rank fusion (RRF), retrieve `candidate_k > K` rows from each branch before combining ranks. Apply the final `LIMIT K` after fusion. Truncating each branch to K can discard documents that would rank highly after fusion; tune candidate depth against measured recall.
+- For batched embedding responses with an `index` field, associate each vector with its input chunk by that index, not response order. Before inserting, require the response count to equal the chunk count and the indices to contain exactly `0..n-1`, with no duplicates or gaps.

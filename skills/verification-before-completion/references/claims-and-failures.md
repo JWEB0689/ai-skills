@@ -18,11 +18,13 @@
 
 "Tests pass" and "requirements met" are different claims: re-read the plan or requirements, create a line-by-line checklist, verify each item against the implementation, then report gaps or confirm completion. Passing tests prove the code works, not that the right code was written.
 
+Build the checklist from the plan and later clear corrections in the conversation; a later correction supersedes the earlier item, which stays visible as superseded.
+
 ## Common Claims and Their Proof
 
 | Claim | Required Proof |
 |-------|---------------|
-| "Tests pass" | Test runner output showing 0 failures, exit code 0 |
+| "Tests pass" | Test runner output showing 0 failures, exit code 0, and a positive executed-test count |
 | "Build succeeds" | Build command output with exit code 0 |
 | "Bug is fixed" | Original reproduction case now passes |
 | "Feature complete" | All acceptance criteria verified individually |
@@ -41,6 +43,8 @@ Before marking a deliverable done, classify how it can be verified, then verify 
 | External state | DNS record, cloud console setting, OAuth allowlist, secret-manager entry | unverifiable from the tree; name the system and the exact check the user must run |
 | Content shape | a file must follow a convention | in this repo: run the project's validator; elsewhere: cross-repo rules apply |
 
+Distinguish implemented, pushed or merged, deployed, and externally verified delivery states; evidence for an earlier state never proves a later one.
+
 The ledger tracks per-item sweep state; these outcomes classify each deliverable in the final report; a ledger row is `done` only when its deliverable classifies as done or changed. Outcomes are **done**, **partial**, **not done**, **changed** (same goal, different means; say how), or **unverifiable**. A concrete filesystem path is never unverifiable: run the existence check and report done or not done. Code that *handles* a deliverable is not the deliverable; shipping the extractor is not shipping the extracted file. When torn between done and unverifiable, report unverifiable; a confirmation prompt costs seconds, a silently missed deliverable does not.
 
 **Every per-branch scope claim is falsifiable and needs its own evidence.** "Master-only" and "the stable branch still has the guard" are assertions a reviewer will check, and reading the broken code on the branch being patched proves nothing about the others. For each branch named, run both a containment query for the introducing commit and a direct read of the function body at that branch's tip. A branch can contain the commit and have been re-fixed since, or not contain it and be broken for another reason.
@@ -54,7 +58,7 @@ If the output does not confirm the claim:
 3. **Return to implementation.** Fix the issue, then re-run from Step 1 of the Gate Function.
 4. **Failure unrelated to the current changes** (pre-existing flaky test, environment issue)? State it explicitly with evidence: show the failure also occurs on the base branch or is a known issue. Pick that ref deliberately (the prior head is an intermediate state, so a regression claim is measured against the base the branch was cut from) and strip machinery the question does not need. Distrust a control that was expected to fail narrowly and came back with a wide sweep: a whole class may not have existed at that ref. "Environmental" and "pre-existing" are compatible, so naming one does not retire the other. Before either label, rule out the task's own formatters, hooks, and generators as the cause, including downstream failures they produced outside the approved files; an aggregate check that broke because this change triggered a regeneration is a regression of this change.
 
-**Where the harness has a known noise floor, the signal is the failing-set diff, not the pass count.** Against a stubbed dependency or an unsupported lane, a suite reports the same fixed block of failures every run. Capture the failing test names on the unmodified base, re-run with the change, and diff the sets; an empty diff is the pass criterion.
+**An unchanged failing-test set does not establish a pass.** When baseline failures exist, capture the collected and executed test inventories, including skipped or deselected tests, on the explicit unmodified base and with the change under comparable conditions. Account for every inventory change. Compare failure signatures: test names, failed assertions, error messages, stack traces, and relevant output. Matching names can hide a changed cause or missing passing tests. Verify affected behavior separately. When the comparison supports it, report "no additional observed failures" and retain the unresolved baseline failures in the handoff; do not call the suite passing.
 
 ## Pre-Commit Hook Failures
 

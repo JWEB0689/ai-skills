@@ -49,6 +49,7 @@ Observed as of 2026-08. Treat as a dated list of over-used combinations, not a p
 | Pattern | Problem | Alternative |
 |---------|---------|-------------|
 | Inter/Roboto/System font everywhere | Zero personality | Cabinet Grotesk, Satoshi, or a context-appropriate serif. The current reflex "personality" faces (Geist, Outfit, Fraunces, Playfair Display, Cormorant, Space Grotesk, Instrument Serif) are themselves a tell in the display role; several remain fine as body or UI faces |
+| Declared display face silently replaced by a fallback | The chosen typography never reaches the page | Load files from a provider that hosts the face and inspect actual rendered fonts; follow [font-loading guidance](./aesthetics-and-interaction.md) |
 | Letter-spacing tighter than about -0.04em on display type | Tight tracking is a taste; crushed tracking is a tell | Stop at roughly -0.04em and get presence from size and weight instead |
 | Uniform font-weight (400 regular everywhere) | Flat hierarchy | Weight contrast: 500/600 for headings, 400 for body |
 | Title Case In Every Heading Word | Overly formal, AI tell | Sentence case |
@@ -64,6 +65,7 @@ Observed as of 2026-08. Treat as a dated list of over-used combinations, not a p
 | Icons inside colored circles (primary-color background circle + white icon) | Default AI component decoration; #3 most common AI pattern | Use icons inline, or with subtle background tints matching the surface |
 | `rounded-2xl` / `rounded-3xl` on containers, cards, and sections | Bubbly, toy-like feel | Reserve large radii for small interactive elements; use tighter radii for containers |
 | Generic stock imagery | Placeholder feel | Contextual photos, SVG illustrations, or abstract graphics suited to the domain |
+| Fabricated product UI assembled from styled divs, including invented version or sync footers inside the preview | Implies a product surface or state that the preview cannot demonstrate | Use a real screenshot or functioning component preview; put optional window chrome around that evidence, or omit the preview |
 | Floating gradient blobs as background | Overused AI aesthetic | Noise textures, mesh gradients, geometric patterns |
 | Custom mouse cursors (`cursor: url(...)`) | Novelty that signals template code | Use system cursors; reserve custom cursors for drawing tools or games |
 | shadcn/ui components left in generic default state | Identifiably "template starter kit" | Customize colors, spacing, and radii to match the design system |
@@ -100,6 +102,6 @@ Preserve supplied or measured metrics, prices, names, and contact details. Apply
 
 The pattern tables above catch known tells one at a time. These three tests catch the whole class; run them against finished output before shipping.
 
-- **Template test**: swap in completely different content (a different product, different copy, different data). If the layout still makes sense without any structural change, a template was built, not a design. Redo it. A real design carries the fingerprint of its specific content; a template tolerates any payload.
+- **Template test (greenfield pages and apps outside reference-fidelity mode)**: assess whether the palette, typography, and layout fit the subject. If the visual direction could serve an unrelated brief unchanged, revise the generic choices. Skip this gate for supplied references and components matched to an existing design system. Do not treat reusable tables, forms, dashboards, or component systems as failures solely because they support different content.
 - **AI Slop test**: would a stranger glancing at only the first viewport immediately say "an AI made this"? If yes, the committed direction was not committed enough. Push the signature visual choice further until the answer is no.
 - **Content authenticity check**: trace metrics, prices, identities, and contact details to supplied or measured sources. Preserve factual values even when round. Label synthetic demo content explicitly and keep it separate from production claims.

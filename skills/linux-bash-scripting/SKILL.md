@@ -5,7 +5,9 @@ description: >-
   Defensive Bash scripting for Linux: safe foundations, argument parsing,
   production patterns, ShellCheck compliance. Use when writing bash scripts,
   shell scripts, cron jobs, or CLI tools in bash.
-paths: "**/*.sh,**/*.bash"
+paths:
+  - "**/*.sh"
+  - "**/*.bash"
 ---
 
 # Linux Bash Scripting
@@ -21,7 +23,9 @@ Target: GNU Bash 4.4+ on Linux. No macOS/BSD workarounds, no Windows paths, no P
 set -Eeuo pipefail
 shopt -s inherit_errexit
 
-readonly SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+SCRIPT_DIR=$(dirname -- "${BASH_SOURCE[0]}") || exit "$?"
+SCRIPT_DIR=$(cd -- "${SCRIPT_DIR}" && pwd -P) || exit "$?"
+readonly SCRIPT_DIR
 
 trap 'printf "Error at %s:%d\n" "${BASH_SOURCE[0]}" "$LINENO" >&2' ERR
 trap 'rm -rf -- "${_tmpdir:-}"' EXIT
@@ -31,14 +35,14 @@ trap 'rm -rf -- "${_tmpdir:-}"' EXIT
 - `inherit_errexit` propagates errexit into `$()`  command substitutions
 - Resolve the script's own data files against `SCRIPT_DIR`, never the caller's cwd or `git rev-parse --show-toplevel`. A shared linter invoked from another project's git hook, a cron job, or a wrapper runs with someone else's cwd, so a caller-relative rules path resolves to a file that does not exist: the rule set loads empty, zero violations are found, exit 0. It is a silent no-op, not an error, and running it from inside its own repo passes for the wrong reason. Exercise it once from a scratch directory that is not the script's own tree
 - Always create temp dirs under the EXIT trap: `_tmpdir=$(mktemp -d)`
-- Wrap body in `main() { ... }` with source guard: `[[ "${BASH_SOURCE[0]}" == "$0" ]] && main "$@"`; enables sourcing for testing
+- Wrap the body in a `main` function. Guard its invocation so direct execution runs it and sourcing only defines functions for testing.
 
 ## Core rules
 
 - Quote expansions, use arrays for commands, and never evaluate external data as shell code.
 - Validate numeric syntax, sign, and application bounds before arithmetic. Convert unsigned digits with `10#` before applying the sign; `10#-08` is invalid.
 - Keep secrets out of process arguments and tracing. Feed them through stdin and use a JSON-aware encoder.
-- Check exact exit statuses where “absent” differs from “failed to inspect.” Separate `local` declarations from command substitutions.
+- Check exact exit statuses where “absent” differs from “failed to inspect.” Separate `local` and `readonly` declarations from command substitutions.
 - Use NUL-delimited file iteration, validate required flag values, and reject conflicting output/target combinations.
 - For atomic replacement, stage beside the destination; for multi-file activation, switch a single staged release reference.
 - Preserve unrelated files and report the actual signal or command status after cleanup.
@@ -61,10 +65,10 @@ Read the relevant reference before implementing the matching behavior:
 
 ## Bash 4.4+ / 5.x
 
-- `${var@Q}` shell-quoted, `${var@U}` uppercase, `${var@L}` lowercase
+- `${var@Q}` shell-quoted (Bash 4.4+); `${var@U}` uppercase and `${var@L}` lowercase (Bash 5.1+)
 - `declare -n ref=varname` nameref for indirect access
 - `wait -n` wait for any background job
-- `$EPOCHSECONDS`, `$EPOCHREALTIME`: timestamps without forking `date`
+- `$EPOCHSECONDS`, `$EPOCHREALTIME`: timestamps without forking `date` (Bash 5.0+)
 
 ## Linux-Specific
 
@@ -79,7 +83,8 @@ Run `shellcheck --enable=all script.sh`. Key rules:
 - **SC2086**: Double-quote variables
 - **SC2046**: Quote command substitutions
 - **SC2164**: `cd dir || exit`
-- **SC2327/SC2328**: Use `${BASH_REMATCH[n]}` not `$n` for regex captures
+- **SC2327/SC2328**: Keep stdout available to command substitution; redirecting it away leaves the captured value empty
+- Read regex captures from `${BASH_REMATCH[n]}`, not positional parameters
 
 Pre-commit: `shellcheck *.sh && shfmt -i 2 -ci -d *.sh`
 
