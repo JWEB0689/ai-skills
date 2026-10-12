@@ -5,6 +5,11 @@ All notable changes to ai-skills will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions track the upstream [whetstone plugin](https://github.com/iliaal/whetstone).
 
+## [5.1.1] - 2026-10-12
+
+### Changed
+- `ia-git-worktree` copies `.env` files only when the base is the default branch or a local branch that already contains the fetched commit, fetches branch bases as `refs/heads` so a same-named tag cannot replace them, never follows a symlink while copying env files, and tells agents to skip install scripts and plugins in untrusted trees.
+
 ## [5.1.0] - 2026-10-11
 
 ### Added
