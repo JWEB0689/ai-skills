@@ -50,6 +50,11 @@ Capture stdout/stderr to a file so a quiet tail isn't mistaken for a dead proces
   first line of any error output). Giving up does not convert the result: an
   `unavailable` pass is still never "clean" and never an input to a
   merge-readiness verdict.
+- **An `incomplete` pass (see below) gets one re-run** with the missing context
+  supplied or the packet partitioned. A second consecutive `incomplete`, or any
+  mix of `incomplete` and `unavailable` results reaching two in a row, stops the
+  loop. Report the uncovered scope by path; `incomplete` is never "clean" and
+  never an input to a merge-readiness verdict.
 
 ## A failed external review is not a clean one
 
@@ -62,6 +67,14 @@ operator's explicit `disabled` opt-out from a failure-driven `unavailable`; both
 are reported, and neither is a pass. On failure, do not silently substitute a
 different external provider; report which reviewer was attempted and what
 happened (exit status, elapsed time, the first line of any error output).
+
+Ask the reviewer to state its scope coverage. A structured verdict that reports
+missing context, inaccessible inputs, truncated input, or an unfinished
+assessment is `incomplete`, never clean; when the reviewer says nothing about
+coverage, treat coverage as unverified rather than complete. The reviewer's
+sandbox starts empty, so supply the unchanged files each change depends on, and
+never truncate or cap the packet silently: partition a large input so every
+change is reviewed against all the context it needs.
 
 ## Egress consent: the packet leaves this machine
 
@@ -85,10 +98,15 @@ local review. The set:
 
 - the `.env` family (`.env`, `.env.*`), except template variants
   `.env.example`, `.env.sample`, and `.env.template`
-- SSH private keys: `**/.ssh/**`, `id_rsa`, `id_dsa`, `id_ecdsa`, `id_ed25519`
-- `.netrc`, `.npmrc`, `.pypirc`, `.dockercfg`
+- SSH private keys: `**/.ssh/**`, `id_rsa`, `id_dsa`, `id_ecdsa`, `id_ed25519`,
+  `id_ecdsa_sk`, `id_ed25519_sk`, `id_xmss`, and any extensionless name ending
+  in `_rsa` or `_ed25519`
+- `.netrc`, `.npmrc`, `.pypirc`, `.dockercfg`, `.pgpass`, `.git-credentials`
+- a file named exactly `credentials` (the AWS and gcloud CLI convention)
 
-Decide on the path alone; never read the file's content to make the call.
+Decide on the path alone; never read the file's content to make the call. For a
+rename or copy, test the old path as well as the new one: a file moved away from
+a secret-shaped name still carries the secret.
 Report each excluded path in the packet description so the operator knows it
 was withheld.
 

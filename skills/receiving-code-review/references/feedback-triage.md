@@ -24,12 +24,13 @@ Triage all feedback first (see [Implementation order](./fix-and-handoff.md#imple
 
 When feedback is ambiguous or incomplete:
 
-- **Stop**: do not implement anything unclear
-- Clarify ALL unclear items before implementing ANY of them (they may be related)
+- **Stop**: do not implement anything unclear, or anything an unclear item could change
+- Ask all clarifications together, before starting any other work, because unclear items may be related to each other and to clear ones
+- Continue a clear item while the answers are pending only when it is independent: no plausible reading of any unclear item touches the same code path, invariant, or file. When in doubt, it is not independent
 - Ask specific questions: "Are you suggesting X or Y?" not "Can you elaborate?"
 - If the reviewer's intent is clear but the technical approach is wrong, say so
 
-**Batched clarification for critical-path ambiguity:** When multiple ambiguous findings land on critical-path code (auth, payments, data migrations, permission checks) AND the `AskUserQuestion` tool is available, batch up to 4 of them, within the active tool's actual limit, into a single call rather than asking one at a time. Each question's header is the truncated filename and line, and the options are `Valid / False positive / Defer`. Skip the batched ask entirely when ambiguous findings are only on non-critical paths; auto-triage those and move on. If `AskUserQuestion` is not available, fall back to a single prose block listing all ambiguous items numbered, asking for Valid/False-positive/Defer decisions. Use 4 as the maximum editorial batch size; a lower active-tool limit takes precedence.
+**Batched clarification for critical-path ambiguity:** When multiple ambiguous findings land on critical-path code (auth, payments, data migrations, permission checks) AND the `AskUserQuestion` tool is available, batch up to 4 of them, within the active tool's actual limit, into a single call rather than asking one at a time. Each question's header is the truncated filename and line, and the options are `Valid / False positive / Defer`. When ambiguous findings sit only on non-critical paths, skip the batched ask: classify them as Valid / False positive / Defer and report the classification, but implement none of them until the reviewer or owner answers. If `AskUserQuestion` is not available, fall back to a single prose block listing all ambiguous items numbered, asking for Valid/False-positive/Defer decisions. Use 4 as the maximum editorial batch size; a lower active-tool limit takes precedence.
 
 ## Conventional Comments Prefixes
 
