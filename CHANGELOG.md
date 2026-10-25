@@ -5,6 +5,21 @@ All notable changes to ai-skills will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions track the upstream [whetstone plugin](https://github.com/iliaal/whetstone).
 
+## [5.1.3] - 2026-10-25
+
+### Changed
+- `ia-code-review` separated staged and unstaged review coverage, retrieved every PR discussion channel and page, and required caller adoption before honoring repository-defined policy exceptions. It also added parser-agreement checks, Bun startup isolation, and Claude credential-file exclusions for external review.
+- `ia-agent-native-architecture` preserved tool-call identity through checkpoints and compaction, separated runtime data from trusted instructions, followed MCP discovery cursors, and strengthened parity and recovery tests. Architecture audits separated structural coverage from evidence of emergent capability or improvement over time.
+- `ia-php-laravel` added guidance for expanded input-key limits, reused object identities in `once()`, `Http::batch()` failure accounting, relation restore writes, PostgreSQL cache-lock contention, and associative-array bypasses in scalar `Rule::anyOf()` alternatives. Parallel database tests retained Laravel's per-worker isolation.
+- `ia-nodejs-backend` covered client-safe transport errors and incomplete-download signaling. `ia-postgresql` required whole-transaction retries and accounted for PostgreSQL 18 skip scans. `ia-python-services` isolated user-level uv settings while preserving repository configuration.
+- `ia-verification-before-completion` required final frontend checks against a fresh production build.
+- `ia-md-docs` recognized effective Codex override files and nested guidance. `ia-reflect` deduplicated inherited evidence by originating incident.
+### Fixed
+- `ia-git-worktree` supported bare repositories while retaining ownership and cleanup safeguards. Its manager and `ia-planning` preserved existing ignore entries when `.gitignore` lacked a trailing newline.
+- `ia-c-systems` corrected claims about function-specific optimization and what a clean sanitizer run proves. `ia-rust-systems` corrected CORS ordering, tracing field exposure, capacity errors, and retry boundaries.
+- `ia-react-frontend` corrected asynchronous-effect tests and Tailwind class-order configuration. `ia-test-audit` required a failing control to establish that type assertions run; `ia-writing-tests` preserved the tested command's exit status before matching output.
+- Skill routing narrowed unrelated matches for `ia-php-laravel`, `ia-planning`, `ia-simplifying-code`, and `ia-reflect`, and expanded missed requests for debugging, frontend design, review feedback, verification, shell scripting, agent architecture, and writing. Added 155 trigger regression cases.
+
 ## [5.1.2] - 2026-10-19
 
 ### Added

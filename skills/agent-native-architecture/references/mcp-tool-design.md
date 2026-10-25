@@ -558,7 +558,9 @@ return {
 };
 ```
 
-**Pagination contract:** List endpoints must return `has_more`, `next_offset`, and `total_count`. Default page size 20-50 items. Never load all results into memory.
+**Application data pagination:** For the list-tool payloads in these examples, return `has_more`, `next_offset`, and `total_count`. Default to 20-50 items per page. Process application data one page at a time.
+
+**MCP tool discovery:** Native `tools/list` uses [opaque protocol cursors](https://modelcontextprotocol.io/specification/2025-11-25/server/utilities/pagination). For a complete tool inventory, pass each returned `nextCursor` unchanged as the next request's `cursor` until `nextCursor` is absent. An SDK iterator is suitable only if it guarantees that traversal. Do not infer completion from page size. If a page fails or a cap stops discovery, report the inventory as incomplete. Test with a server whose first response contains a nonempty `nextCursor`. Confirm the actual client exposes tools from later pages.
 </principle>
 
 <principle name="output-data-minimization">
@@ -668,7 +670,8 @@ The eval is the single best proxy for "does a real agent successfully use this s
 - [ ] Descriptions pass the machine-parsed-text rules: one directive per sentence, simple tenses, noun stacks capped at three, no dropped referents
 - [ ] Tool annotations set (`readOnlyHint`, `destructiveHint`, `idempotentHint`, `openWorldHint`)
 - [ ] Error messages include recovery suggestions, not just failure descriptions
-- [ ] List endpoints paginate with `has_more`, `next_offset`, `total_count`
+- [ ] Example application list payloads paginate with `has_more`, `next_offset`, `total_count`
+- [ ] Native `tools/list` discovery follows every cursor before claiming a complete inventory; a paginated-server test exposes tools beyond the first page
 - [ ] Long jobs return a handle/status tool or negotiate task support; human input uses elicitation, and documented timeouts account for host backgrounding
 - [ ] Bounded or paginated lookups return `incomplete` (distinct from not-found and unique) when a cap or unreadable records cut the scan short
 - [ ] Money-spending or live-external-effect tools require an explicit opt-in separate from credentials and ship a credential-free, labelled dry-run
@@ -681,7 +684,7 @@ The eval is the single best proxy for "does a real agent successfully use this s
 - [ ] For external APIs where agent should have full access, use dynamic discovery
 - [ ] Include a `list_*` or `discover_*` tool for each API surface
 - [ ] Use string inputs (not enums) when the API validates
-- [ ] Inject available capabilities into system prompt at runtime
+- [ ] Supply discovered capability inventories as labeled runtime data or tool results; keep trusted static tool definitions in system/developer instructions
 - [ ] Only use static tool mapping if intentionally limiting agent scope
 
 **CRUD Completeness:**
